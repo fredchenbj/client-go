@@ -48,6 +48,8 @@ const (
 	CmdRawBatchGet
 	CmdRawPut
 	CmdRawBatchPut
+	CmdRawUpdate
+	CmdRawBatchUpdate
 	CmdRawDelete
 	CmdRawBatchDelete
 	CmdRawDeleteRange
@@ -95,6 +97,10 @@ func (t CmdType) String() string {
 		return "RawPut"
 	case CmdRawBatchPut:
 		return "RawBatchPut"
+	case CmdRawUpdate:
+		return "RawUpdate"
+	case CmdRawBatchUpdate:
+		return "RawBatchUpdate"
 	case CmdRawDelete:
 		return "RawDelete"
 	case CmdRawBatchDelete:
@@ -138,6 +144,8 @@ type Request struct {
 	RawBatchGet        *kvrpcpb.RawBatchGetRequest
 	RawPut             *kvrpcpb.RawPutRequest
 	RawBatchPut        *kvrpcpb.RawBatchPutRequest
+	RawUpdate          *kvrpcpb.RawUpdateRequest
+	RawBatchUpdate     *kvrpcpb.RawBatchUpdateRequest
 	RawDelete          *kvrpcpb.RawDeleteRequest
 	RawBatchDelete     *kvrpcpb.RawBatchDeleteRequest
 	RawDeleteRange     *kvrpcpb.RawDeleteRangeRequest
@@ -182,6 +190,10 @@ func (req *Request) ToBatchCommandsRequest() *tikvpb.BatchCommandsRequest_Reques
 		return &tikvpb.BatchCommandsRequest_Request{Cmd: &tikvpb.BatchCommandsRequest_Request_RawPut{RawPut: req.RawPut}}
 	case CmdRawBatchPut:
 		return &tikvpb.BatchCommandsRequest_Request{Cmd: &tikvpb.BatchCommandsRequest_Request_RawBatchPut{RawBatchPut: req.RawBatchPut}}
+	case CmdRawUpdate:
+		return &tikvpb.BatchCommandsRequest_Request{Cmd: &tikvpb.BatchCommandsRequest_Request_RawUpdate{RawUpdate: req.RawUpdate}}
+	case CmdRawBatchUpdate:
+		return &tikvpb.BatchCommandsRequest_Request{Cmd: &tikvpb.BatchCommandsRequest_Request_RawBatchUpdate{RawBatchUpdate: req.RawBatchUpdate}}
 	case CmdRawDelete:
 		return &tikvpb.BatchCommandsRequest_Request{Cmd: &tikvpb.BatchCommandsRequest_Request_RawDelete{RawDelete: req.RawDelete}}
 	case CmdRawBatchDelete:
@@ -214,6 +226,8 @@ type Response struct {
 	RawBatchGet        *kvrpcpb.RawBatchGetResponse
 	RawPut             *kvrpcpb.RawPutResponse
 	RawBatchPut        *kvrpcpb.RawBatchPutResponse
+	RawUpdate          *kvrpcpb.RawUpdateResponse
+	RawBatchUpdate     *kvrpcpb.RawBatchUpdateResponse
 	RawDelete          *kvrpcpb.RawDeleteResponse
 	RawBatchDelete     *kvrpcpb.RawBatchDeleteResponse
 	RawDeleteRange     *kvrpcpb.RawDeleteRangeResponse
@@ -259,6 +273,10 @@ func FromBatchCommandsResponse(res *tikvpb.BatchCommandsResponse_Response) *Resp
 		return &Response{Type: CmdRawPut, RawPut: res.RawPut}
 	case *tikvpb.BatchCommandsResponse_Response_RawBatchPut:
 		return &Response{Type: CmdRawBatchPut, RawBatchPut: res.RawBatchPut}
+	case *tikvpb.BatchCommandsResponse_Response_RawUpdate:
+		return &Response{Type: CmdRawUpdate, RawUpdate: res.RawUpdate}
+	case *tikvpb.BatchCommandsResponse_Response_RawBatchUpdate:
+		return &Response{Type: CmdRawBatchUpdate, RawBatchUpdate: res.RawBatchUpdate}
 	case *tikvpb.BatchCommandsResponse_Response_RawDelete:
 		return &Response{Type: CmdRawDelete, RawDelete: res.RawDelete}
 	case *tikvpb.BatchCommandsResponse_Response_RawBatchDelete:
@@ -321,6 +339,10 @@ func SetContext(req *Request, region *metapb.Region, peer *metapb.Peer) error {
 		req.RawPut.Context = ctx
 	case CmdRawBatchPut:
 		req.RawBatchPut.Context = ctx
+	case CmdRawUpdate:
+		req.RawUpdate.Context = ctx
+	case CmdRawBatchUpdate:
+		req.RawBatchUpdate.Context = ctx
 	case CmdRawDelete:
 		req.RawDelete.Context = ctx
 	case CmdRawBatchDelete:
@@ -413,6 +435,14 @@ func GenRegionErrorResp(req *Request, e *errorpb.Error) (*Response, error) {
 		resp.RawBatchPut = &kvrpcpb.RawBatchPutResponse{
 			RegionError: e,
 		}
+	case CmdRawUpdate:
+		resp.RawUpdate = &kvrpcpb.RawUpdateResponse{
+			RegionError: e,
+		}
+	case CmdRawBatchUpdate:
+		resp.RawBatchUpdate = &kvrpcpb.RawBatchUpdateResponse{
+			RegionError: e,
+		}
 	case CmdRawDelete:
 		resp.RawDelete = &kvrpcpb.RawDeleteResponse{
 			RegionError: e,
@@ -495,6 +525,10 @@ func (resp *Response) GetRegionError() (*errorpb.Error, error) {
 		e = resp.RawPut.GetRegionError()
 	case CmdRawBatchPut:
 		e = resp.RawBatchPut.GetRegionError()
+	case CmdRawUpdate:
+		e = resp.RawUpdate.GetRegionError()
+	case CmdRawBatchUpdate:
+		e = resp.RawBatchUpdate.GetRegionError()
 	case CmdRawDelete:
 		e = resp.RawDelete.GetRegionError()
 	case CmdRawBatchDelete:
@@ -559,6 +593,10 @@ func CallRPC(ctx context.Context, client tikvpb.TikvClient, req *Request) (*Resp
 		resp.RawPut, err = client.RawPut(ctx, req.RawPut)
 	case CmdRawBatchPut:
 		resp.RawBatchPut, err = client.RawBatchPut(ctx, req.RawBatchPut)
+	case CmdRawUpdate:
+		resp.RawUpdate, err = client.RawUpdate(ctx, req.RawUpdate)
+	case CmdRawBatchUpdate:
+		resp.RawBatchUpdate, err = client.RawBatchUpdate(ctx, req.RawBatchUpdate)
 	case CmdRawDelete:
 		resp.RawDelete, err = client.RawDelete(ctx, req.RawDelete)
 	case CmdRawBatchDelete:
