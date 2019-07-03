@@ -175,8 +175,60 @@ func (c *Client) BatchPut(ctx context.Context, keys, values [][]byte) error {
 		}
 	}
 	bo := retry.NewBackoffer(ctx, retry.RawkvMaxBackoff)
-	return c.sendBatchPut(bo, keys, values)
+	return c.sendBatchPut(bo, keys, values, rpc.CmdRawBatchPut)
 }
+
+// Update stores a key-value pair to TiKV.
+func (c *Client) Update(ctx context.Context, key, value []byte) error {
+	start := time.Now()
+	defer func() { metrics.RawkvCmdHistogram.WithLabelValues("update").Observe(time.Since(start).Seconds()) }()
+	metrics.RawkvSizeHistogram.WithLabelValues("key").Observe(float64(len(key)))
+	metrics.RawkvSizeHistogram.WithLabelValues("value").Observe(float64(len(value)))
+
+	if len(value) == 0 {
+		return errors.New("empty value is not supported")
+	}
+
+	req := &rpc.Request{
+		Type: rpc.CmdRawUpdate,
+		RawPut: &kvrpcpb.RawPutRequest{
+			Key:   key,
+			Value: value,
+		},
+	}
+	resp, _, err := c.sendReq(ctx, key, req)
+	if err != nil {
+		return err
+	}
+	cmdResp := resp.RawPut
+	if cmdResp == nil {
+		return errors.WithStack(rpc.ErrBodyMissing)
+	}
+	if cmdResp.GetError() != "" {
+		return errors.New(cmdResp.GetError())
+	}
+	return nil
+}
+
+// BatchUpdate stores key-value pairs to TiKV.
+func (c *Client) BatchUpdate(ctx context.Context, keys, values [][]byte) error {
+	start := time.Now()
+	defer func() {
+		metrics.RawkvCmdHistogram.WithLabelValues("batch_update").Observe(time.Since(start).Seconds())
+	}()
+
+	if len(keys) != len(values) {
+		return errors.New("the len of keys is not equal to the len of values")
+	}
+	for _, value := range values {
+		if len(value) == 0 {
+			return errors.New("empty value is not supported")
+		}
+	}
+	bo := retry.NewBackoffer(ctx, retry.RawkvMaxBackoff)
+	return c.sendBatchPut(bo, keys, values, rpc.CmdRawBatchUpdate)
+}
+
 
 // Delete deletes a key-value pair from TiKV.
 func (c *Client) Delete(ctx context.Context, key []byte) error {
@@ -518,7 +570,7 @@ func (c *Client) sendDeleteRangeReq(ctx context.Context, startKey []byte, endKey
 	}
 }
 
-func (c *Client) sendBatchPut(bo *retry.Backoffer, keys, values [][]byte) error {
+func (c *Client) sendBatchPut(bo *retry.Backoffer, keys, values [][]byte, cmdType rpc.CmdType) error {
 	keyToValue := make(map[string][]byte)
 	for i, key := range keys {
 		keyToValue[string(key)] = values[i]
@@ -539,7 +591,7 @@ func (c *Client) sendBatchPut(bo *retry.Backoffer, keys, values [][]byte) error 
 		go func() {
 			singleBatchBackoffer, singleBatchCancel := bo.Fork()
 			defer singleBatchCancel()
-			ch <- c.doBatchPut(singleBatchBackoffer, batch1)
+			ch <- c.doBatchPut(singleBatchBackoffer, batch1, cmdType)
 		}()
 	}
 
@@ -595,17 +647,29 @@ func appendBatches(batches []batch, regionID locate.RegionVerID, groupKeys [][]b
 	return batches
 }
 
-func (c *Client) doBatchPut(bo *retry.Backoffer, batch batch) error {
+func (c *Client) doBatchPut(bo *retry.Backoffer, batch batch, cmdType rpc.CmdType) error {
 	kvPair := make([]*kvrpcpb.KvPair, 0, len(batch.keys))
 	for i, key := range batch.keys {
 		kvPair = append(kvPair, &kvrpcpb.KvPair{Key: key, Value: batch.values[i]})
 	}
 
-	req := &rpc.Request{
-		Type: rpc.CmdRawBatchPut,
-		RawBatchPut: &kvrpcpb.RawBatchPutRequest{
-			Pairs: kvPair,
-		},
+	var req *rpc.Request
+
+	switch cmdType {
+	case rpc.CmdRawBatchPut:
+		req = &rpc.Request{
+			Type: rpc.CmdRawBatchPut,
+			RawBatchPut: &kvrpcpb.RawBatchPutRequest{
+				Pairs: kvPair,
+			},
+		}
+	case rpc.CmdRawBatchUpdate:
+		req = &rpc.Request{
+			Type: rpc.CmdRawBatchUpdate,
+			RawBatchUpdate: &kvrpcpb.RawBatchUpdateRequest{
+				Pairs: kvPair,
+			},
+		}
 	}
 
 	sender := rpc.NewRegionRequestSender(c.regionCache, c.rpcClient)
@@ -623,16 +687,28 @@ func (c *Client) doBatchPut(bo *retry.Backoffer, batch batch) error {
 			return err
 		}
 		// recursive call
-		return c.sendBatchPut(bo, batch.keys, batch.values)
+		return c.sendBatchPut(bo, batch.keys, batch.values, cmdType)
 	}
 
-	cmdResp := resp.RawBatchPut
-	if cmdResp == nil {
-		return errors.WithStack(rpc.ErrBodyMissing)
+	switch cmdType {
+	case rpc.CmdRawBatchPut:
+		cmdResp := resp.RawBatchPut
+		if cmdResp == nil {
+			return errors.WithStack(rpc.ErrBodyMissing)
+		}
+		if cmdResp.GetError() != "" {
+			return errors.New(cmdResp.GetError())
+		}
+	case rpc.CmdRawBatchUpdate:
+		cmdResp := resp.RawBatchUpdate
+		if cmdResp == nil {
+			return errors.WithStack(rpc.ErrBodyMissing)
+		}
+		if cmdResp.GetError() != "" {
+			return errors.New(cmdResp.GetError())
+		}
 	}
-	if cmdResp.GetError() != "" {
-		return errors.New(cmdResp.GetError())
-	}
+
 	return nil
 }
 

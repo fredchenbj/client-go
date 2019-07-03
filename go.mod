@@ -52,3 +52,5 @@ require (
 	gopkg.in/alecthomas/kingpin.v2 v2.2.6 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
 )
+
+replace github.com/pingcap/kvproto => github.com/fredchenbj/kvproto v0.0.0-20191007132948-85b070b8ca54
