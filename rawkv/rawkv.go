@@ -40,7 +40,7 @@ type Client struct {
 	conf        *config.Config
 	regionCache *locate.RegionCache
 	pdClient    pd.Client
-	rpcClient   rpc.Client
+	RpcClient   rpc.Client
 }
 
 // NewClient creates a client with PD cluster addrs.
@@ -58,14 +58,14 @@ func NewClient(ctx context.Context, pdAddrs []string, conf config.Config) (*Clie
 		conf:        &conf,
 		regionCache: locate.NewRegionCache(pdCli, &conf.RegionCache),
 		pdClient:    pdCli,
-		rpcClient:   rpc.NewRPCClient(&conf.RPC),
+		RpcClient:   rpc.NewRPCClient(&conf.RPC),
 	}, nil
 }
 
 // Close closes the client.
 func (c *Client) Close() error {
 	c.pdClient.Close()
-	return c.rpcClient.Close()
+	return c.RpcClient.Close()
 }
 
 // ClusterID returns the TiKV cluster ID.
@@ -391,7 +391,7 @@ func (c *Client) ReverseScan(ctx context.Context, startKey, endKey []byte, limit
 
 func (c *Client) sendReq(ctx context.Context, key []byte, req *rpc.Request) (*rpc.Response, *locate.KeyLocation, error) {
 	bo := retry.NewBackoffer(ctx, retry.RawkvMaxBackoff)
-	sender := rpc.NewRegionRequestSender(c.regionCache, c.rpcClient)
+	sender := rpc.NewRegionRequestSender(c.regionCache, c.RpcClient)
 	for {
 		loc, err := c.regionCache.LocateKey(bo, key)
 		if err != nil {
@@ -482,7 +482,7 @@ func (c *Client) doBatchReq(bo *retry.Backoffer, batch batch, cmdType rpc.CmdTyp
 		}
 	}
 
-	sender := rpc.NewRegionRequestSender(c.regionCache, c.rpcClient)
+	sender := rpc.NewRegionRequestSender(c.regionCache, c.RpcClient)
 	resp, err := sender.SendReq(bo, req, batch.regionID, c.conf.RPC.ReadTimeoutShort)
 
 	batchResp := singleBatchResp{}
@@ -531,7 +531,7 @@ func (c *Client) doBatchReq(bo *retry.Backoffer, batch batch, cmdType rpc.CmdTyp
 // TODO: Is there any better way to avoid duplicating code with func `sendReq` ?
 func (c *Client) sendDeleteRangeReq(ctx context.Context, startKey []byte, endKey []byte) (*rpc.Response, []byte, error) {
 	bo := retry.NewBackoffer(ctx, retry.RawkvMaxBackoff)
-	sender := rpc.NewRegionRequestSender(c.regionCache, c.rpcClient)
+	sender := rpc.NewRegionRequestSender(c.regionCache, c.RpcClient)
 	for {
 		loc, err := c.regionCache.LocateKey(bo, startKey)
 		if err != nil {
@@ -672,7 +672,7 @@ func (c *Client) doBatchPut(bo *retry.Backoffer, batch batch, cmdType rpc.CmdTyp
 		}
 	}
 
-	sender := rpc.NewRegionRequestSender(c.regionCache, c.rpcClient)
+	sender := rpc.NewRegionRequestSender(c.regionCache, c.RpcClient)
 	resp, err := sender.SendReq(bo, req, batch.regionID, c.conf.RPC.ReadTimeoutShort)
 	if err != nil {
 		return err
