@@ -129,6 +129,63 @@ func (c *Client) BatchGet(ctx context.Context, keys [][]byte) ([][]byte, error) 
 	return values, nil
 }
 
+// Get queries value with the key by index. When the key does not exist, it returns `nil, nil`.
+func (c *Client) GetByIndex(ctx context.Context, key []byte, indexes [][]byte) ([]*kvrpcpb.Element, error) {
+	start := time.Now()
+	defer func() { metrics.RawkvCmdHistogram.WithLabelValues("get_by_index").Observe(time.Since(start).Seconds()) }()
+
+	req := &rpc.Request{
+		Type: rpc.CmdRawGetByIndex,
+		RawGetByIndex: &kvrpcpb.RawGetByIndexRequest{
+			Key: key,
+			Indexes:indexes,
+		},
+	}
+	resp, _, err := c.sendReq(ctx, key, req)
+	if err != nil {
+		return nil, err
+	}
+	cmdResp := resp.RawGetByIndex
+	if cmdResp == nil {
+		return nil, errors.WithStack(rpc.ErrBodyMissing)
+	}
+	if cmdResp.GetError() != "" {
+		return nil, errors.New(cmdResp.GetError())
+	}
+	if len(cmdResp.Data) == 0 {
+		return nil, nil
+	}
+	return cmdResp.Data, nil
+}
+
+// BatchGet queries values with the keys by indexes.
+func (c *Client) BatchGetByIndex(ctx context.Context, elementIndexes []*kvrpcpb.ElementIndex) ([]*kvrpcpb.Row, error) {
+	start := time.Now()
+	defer func() { metrics.RawkvCmdHistogram.WithLabelValues("batch_get").Observe(time.Since(start).Seconds()) }()
+
+	bo := retry.NewBackoffer(ctx, retry.RawkvMaxBackoff)
+	resp, err := c.sendBatchByIndexReq(bo, elementIndexes)
+	if err != nil {
+		return nil, err
+	}
+
+	cmdResp := resp.RawBatchGetByIndex
+	if cmdResp == nil {
+		return nil, errors.WithStack(rpc.ErrBodyMissing)
+	}
+
+	keyToValue := make(map[string]*kvrpcpb.Row, len(elementIndexes))
+	for _, pair := range cmdResp.Rows {
+		keyToValue[string(pair.Key)] = pair
+	}
+
+	values := make([]*kvrpcpb.Row, len(elementIndexes))
+	for i, key := range elementIndexes {
+		values[i] = keyToValue[string(key.Key)]
+	}
+	return values, nil
+}
+
 // Put stores a key-value pair to TiKV.
 func (c *Client) Put(ctx context.Context, key, value []byte) error {
 	start := time.Now()
@@ -463,6 +520,53 @@ func (c *Client) sendBatchReq(bo *retry.Backoffer, keys [][]byte, cmdType rpc.Cm
 	return resp, firstError
 }
 
+func (c *Client) sendBatchByIndexReq(bo *retry.Backoffer, elementIndex []*kvrpcpb.ElementIndex) (*rpc.Response, error) { // split the keys
+	var keys [][]byte
+	for _, ele := range elementIndex {
+		keys = append(keys, ele.Key)
+	}
+	groups, _, err := c.regionCache.GroupKeysByRegion(bo, keys)
+	if err != nil {
+		return nil, err
+	}
+
+	var batches []batchAndIndex
+	for regionID, groupKeys := range groups {
+		batches = appendKeyBatchesByIndex(batches, regionID, groupKeys, elementIndex, c.conf.Raw.BatchPairCount)
+	}
+	bo, cancel := bo.Fork()
+	ches := make(chan singleBatchResp, len(batches))
+	for _, batch := range batches {
+		batch1 := batch
+		go func() {
+			singleBatchBackoffer, singleBatchCancel := bo.Fork()
+			defer singleBatchCancel()
+			ches <- c.doBatchByIndexReq(singleBatchBackoffer, batch1)
+		}()
+	}
+
+	var firstError error
+	var resp *rpc.Response
+	resp = &rpc.Response{Type: rpc.CmdRawBatchGetByIndex, RawBatchGetByIndex: &kvrpcpb.RawBatchGetByIndexResponse{}}
+
+	for i := 0; i < len(batches); i++ {
+		singleResp, ok := <-ches
+		if ok {
+			if singleResp.err != nil {
+				cancel()
+				if firstError == nil {
+					firstError = singleResp.err
+				}
+			} else {
+				cmdResp := singleResp.resp.RawBatchGetByIndex
+				resp.RawBatchGetByIndex.Rows = append(resp.RawBatchGetByIndex.Rows, cmdResp.Rows...)
+			}
+		}
+	}
+
+	return resp, firstError
+}
+
 func (c *Client) doBatchReq(bo *retry.Backoffer, batch batch, cmdType rpc.CmdType) singleBatchResp {
 	var req *rpc.Request
 	switch cmdType {
@@ -522,6 +626,44 @@ func (c *Client) doBatchReq(bo *retry.Backoffer, batch batch, cmdType rpc.CmdTyp
 		}
 		batchResp.resp = resp
 	}
+	return batchResp
+}
+
+func (c *Client) doBatchByIndexReq(bo *retry.Backoffer, batch batchAndIndex) singleBatchResp {
+	var req *rpc.Request
+	req = &rpc.Request{
+			Type: rpc.CmdRawBatchGetByIndex,
+			RawBatchGetByIndex: &kvrpcpb.RawBatchGetByIndexRequest{
+				ElementIndexes: batch.indexes,
+			},
+	}
+
+	sender := rpc.NewRegionRequestSender(c.regionCache, c.RpcClient)
+	resp, err := sender.SendReq(bo, req, batch.regionID, c.conf.RPC.ReadTimeoutShort)
+
+	batchResp := singleBatchResp{}
+	if err != nil {
+		batchResp.err = err
+		return batchResp
+	}
+	regionErr, err := resp.GetRegionError()
+	if err != nil {
+		batchResp.err = err
+		return batchResp
+	}
+	if regionErr != nil {
+		err := bo.Backoff(retry.BoRegionMiss, errors.New(regionErr.String()))
+		if err != nil {
+			batchResp.err = err
+			return batchResp
+		}
+		resp, err = c.sendBatchByIndexReq(bo, batch.indexes)
+		batchResp.resp = resp
+		batchResp.err = err
+		return batchResp
+	}
+
+	batchResp.resp = resp
 	return batchResp
 }
 
@@ -619,7 +761,27 @@ func appendKeyBatches(batches []batch, regionID locate.RegionVerID, groupKeys []
 		count++
 	}
 	if len(keys) != 0 {
-		batches = append(batches, batch{regionID: regionID, keys: keys})
+		batches = append(batches, batch {regionID: regionID, keys: keys})
+	}
+	return batches
+}
+
+func appendKeyBatchesByIndex(batches []batchAndIndex, regionID locate.RegionVerID, groupKeys [][]byte, indexes []*kvrpcpb.ElementIndex,limit int) []batchAndIndex {
+	var keys [][]byte
+	var index []*kvrpcpb.ElementIndex
+	for start, count := 0, 0; start < len(groupKeys); start++ {
+		if count > limit {
+			batches = append(batches, batchAndIndex{regionID: regionID, keys: keys, indexes:index})
+			keys = make([][]byte, 0, limit)
+			index = make([]*kvrpcpb.ElementIndex, 0, limit)
+			count = 0
+		}
+		keys = append(keys, groupKeys[start])
+		index = append(index, indexes[start])
+		count++
+	}
+	if len(keys) != 0 {
+		batches = append(batches, batchAndIndex{regionID: regionID, keys: keys, indexes: index})
 	}
 	return batches
 }
@@ -716,6 +878,12 @@ type batch struct {
 	regionID locate.RegionVerID
 	keys     [][]byte
 	values   [][]byte
+}
+
+type batchAndIndex struct {
+	regionID locate.RegionVerID
+	keys     [][]byte
+	indexes  []*kvrpcpb.ElementIndex
 }
 
 type singleBatchResp struct {

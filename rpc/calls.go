@@ -46,6 +46,8 @@ const (
 
 	CmdRawGet CmdType = 256 + iota
 	CmdRawBatchGet
+	CmdRawGetByIndex
+	CmdRawBatchGetByIndex
 	CmdRawPut
 	CmdRawBatchPut
 	CmdRawUpdate
@@ -93,6 +95,10 @@ func (t CmdType) String() string {
 		return "RawGet"
 	case CmdRawBatchGet:
 		return "RawBatchGet"
+	case CmdRawGetByIndex:
+		return "RawGetByIndex"
+	case CmdRawBatchGetByIndex:
+		return "RawBatchGetByIndex"
 	case CmdRawPut:
 		return "RawPut"
 	case CmdRawBatchPut:
@@ -142,6 +148,8 @@ type Request struct {
 	DeleteRange        *kvrpcpb.DeleteRangeRequest
 	RawGet             *kvrpcpb.RawGetRequest
 	RawBatchGet        *kvrpcpb.RawBatchGetRequest
+	RawGetByIndex      *kvrpcpb.RawGetByIndexRequest
+	RawBatchGetByIndex *kvrpcpb.RawBatchGetByIndexRequest
 	RawPut             *kvrpcpb.RawPutRequest
 	RawBatchPut        *kvrpcpb.RawBatchPutRequest
 	RawUpdate          *kvrpcpb.RawUpdateRequest
@@ -186,6 +194,10 @@ func (req *Request) ToBatchCommandsRequest() *tikvpb.BatchCommandsRequest_Reques
 		return &tikvpb.BatchCommandsRequest_Request{Cmd: &tikvpb.BatchCommandsRequest_Request_RawGet{RawGet: req.RawGet}}
 	case CmdRawBatchGet:
 		return &tikvpb.BatchCommandsRequest_Request{Cmd: &tikvpb.BatchCommandsRequest_Request_RawBatchGet{RawBatchGet: req.RawBatchGet}}
+	case CmdRawGetByIndex:
+		return &tikvpb.BatchCommandsRequest_Request{Cmd: &tikvpb.BatchCommandsRequest_Request_RawGetByIndex{RawGetByIndex: req.RawGetByIndex}}
+	case CmdRawBatchGetByIndex:
+		return &tikvpb.BatchCommandsRequest_Request{Cmd: &tikvpb.BatchCommandsRequest_Request_RawBatchGetByIndex{RawBatchGetByIndex: req.RawBatchGetByIndex}}
 	case CmdRawPut:
 		return &tikvpb.BatchCommandsRequest_Request{Cmd: &tikvpb.BatchCommandsRequest_Request_RawPut{RawPut: req.RawPut}}
 	case CmdRawBatchPut:
@@ -224,6 +236,8 @@ type Response struct {
 	DeleteRange        *kvrpcpb.DeleteRangeResponse
 	RawGet             *kvrpcpb.RawGetResponse
 	RawBatchGet        *kvrpcpb.RawBatchGetResponse
+	RawGetByIndex      *kvrpcpb.RawGetByIndexResponse
+	RawBatchGetByIndex *kvrpcpb.RawBatchGetByIndexResponse
 	RawPut             *kvrpcpb.RawPutResponse
 	RawBatchPut        *kvrpcpb.RawBatchPutResponse
 	RawUpdate          *kvrpcpb.RawUpdateResponse
@@ -269,6 +283,10 @@ func FromBatchCommandsResponse(res *tikvpb.BatchCommandsResponse_Response) *Resp
 		return &Response{Type: CmdRawGet, RawGet: res.RawGet}
 	case *tikvpb.BatchCommandsResponse_Response_RawBatchGet:
 		return &Response{Type: CmdRawBatchGet, RawBatchGet: res.RawBatchGet}
+	case *tikvpb.BatchCommandsResponse_Response_RawGetByIndex:
+		return &Response{Type: CmdRawGetByIndex, RawGetByIndex: res.RawGetByIndex}
+	case *tikvpb.BatchCommandsResponse_Response_RawBatchGetByIndex:
+		return &Response{Type: CmdRawBatchGetByIndex, RawBatchGetByIndex: res.RawBatchGetByIndex}
 	case *tikvpb.BatchCommandsResponse_Response_RawPut:
 		return &Response{Type: CmdRawPut, RawPut: res.RawPut}
 	case *tikvpb.BatchCommandsResponse_Response_RawBatchPut:
@@ -335,6 +353,10 @@ func SetContext(req *Request, region *metapb.Region, peer *metapb.Peer) error {
 		req.RawGet.Context = ctx
 	case CmdRawBatchGet:
 		req.RawBatchGet.Context = ctx
+	case CmdRawGetByIndex:
+		req.RawGetByIndex.Context = ctx
+	case CmdRawBatchGetByIndex:
+		req.RawBatchGetByIndex.Context = ctx
 	case CmdRawPut:
 		req.RawPut.Context = ctx
 	case CmdRawBatchPut:
@@ -425,6 +447,14 @@ func GenRegionErrorResp(req *Request, e *errorpb.Error) (*Response, error) {
 		}
 	case CmdRawBatchGet:
 		resp.RawBatchGet = &kvrpcpb.RawBatchGetResponse{
+			RegionError: e,
+		}
+	case CmdRawGetByIndex:
+		resp.RawGetByIndex = &kvrpcpb.RawGetByIndexResponse{
+			RegionError: e,
+		}
+	case CmdRawBatchGetByIndex:
+		resp.RawBatchGetByIndex = &kvrpcpb.RawBatchGetByIndexResponse{
 			RegionError: e,
 		}
 	case CmdRawPut:
@@ -521,6 +551,10 @@ func (resp *Response) GetRegionError() (*errorpb.Error, error) {
 		e = resp.RawGet.GetRegionError()
 	case CmdRawBatchGet:
 		e = resp.RawBatchGet.GetRegionError()
+	case CmdRawGetByIndex:
+		e = resp.RawGetByIndex.GetRegionError()
+	case CmdRawBatchGetByIndex:
+		e = resp.RawBatchGetByIndex.GetRegionError()
 	case CmdRawPut:
 		e = resp.RawPut.GetRegionError()
 	case CmdRawBatchPut:
@@ -589,6 +623,10 @@ func CallRPC(ctx context.Context, client tikvpb.TikvClient, req *Request) (*Resp
 		resp.RawGet, err = client.RawGet(ctx, req.RawGet)
 	case CmdRawBatchGet:
 		resp.RawBatchGet, err = client.RawBatchGet(ctx, req.RawBatchGet)
+	case CmdRawGetByIndex:
+		resp.RawGetByIndex, err = client.RawGetByIndex(ctx, req.RawGetByIndex)
+	case CmdRawBatchGetByIndex:
+		resp.RawBatchGetByIndex, err = client.RawBatchGetByIndex(ctx, req.RawBatchGetByIndex)
 	case CmdRawPut:
 		resp.RawPut, err = client.RawPut(ctx, req.RawPut)
 	case CmdRawBatchPut:
