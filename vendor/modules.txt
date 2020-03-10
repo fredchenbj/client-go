@@ -62,7 +62,7 @@ github.com/pingcap/goleveldb/leveldb/opt
 github.com/pingcap/goleveldb/leveldb/storage
 github.com/pingcap/goleveldb/leveldb/table
 github.com/pingcap/goleveldb/leveldb/util
-# github.com/pingcap/kvproto v0.0.0-20190305055742-ab7debc182d9 => github.com/fredchenbj/kvproto v0.0.0-20200224093327-e3299996ffa0
+# github.com/pingcap/kvproto v0.0.0-20190305055742-ab7debc182d9 => github.com/fredchenbj/kvproto v0.0.0-20200309081543-a55b44b368b4
 github.com/pingcap/kvproto/pkg/coprocessor
 github.com/pingcap/kvproto/pkg/eraftpb
 github.com/pingcap/kvproto/pkg/errorpb
