@@ -137,8 +137,8 @@ func (c *Client) GetByIndex(ctx context.Context, key []byte, indexes [][]byte) (
 	req := &rpc.Request{
 		Type: rpc.CmdRawGetByIndex,
 		RawGetByIndex: &kvrpcpb.RawGetByIndexRequest{
-			Key: key,
-			Indexes:indexes,
+			Key:     key,
+			Indexes: indexes,
 		},
 	}
 	resp, _, err := c.sendReq(ctx, key, req)
@@ -285,7 +285,6 @@ func (c *Client) BatchUpdate(ctx context.Context, keys, values [][]byte) error {
 	bo := retry.NewBackoffer(ctx, retry.RawkvMaxBackoff)
 	return c.sendBatchPut(bo, keys, values, rpc.CmdRawBatchUpdate)
 }
-
 
 // Delete deletes a key-value pair from TiKV.
 func (c *Client) Delete(ctx context.Context, key []byte) error {
@@ -516,7 +515,6 @@ func (c *Client) sendBatchReq(bo *retry.Backoffer, keys [][]byte, cmdType rpc.Cm
 			}
 		}
 	}
-
 	return resp, firstError
 }
 
@@ -632,10 +630,10 @@ func (c *Client) doBatchReq(bo *retry.Backoffer, batch batch, cmdType rpc.CmdTyp
 func (c *Client) doBatchByIndexReq(bo *retry.Backoffer, batch batchAndIndex) singleBatchResp {
 	var req *rpc.Request
 	req = &rpc.Request{
-			Type: rpc.CmdRawBatchGetByIndex,
-			RawBatchGetByIndex: &kvrpcpb.RawBatchGetByIndexRequest{
-				ElementIndexes: batch.indexes,
-			},
+		Type: rpc.CmdRawBatchGetByIndex,
+		RawBatchGetByIndex: &kvrpcpb.RawBatchGetByIndexRequest{
+			ElementIndexes: batch.indexes,
+		},
 	}
 
 	sender := rpc.NewRegionRequestSender(c.regionCache, c.RpcClient)
@@ -761,17 +759,17 @@ func appendKeyBatches(batches []batch, regionID locate.RegionVerID, groupKeys []
 		count++
 	}
 	if len(keys) != 0 {
-		batches = append(batches, batch {regionID: regionID, keys: keys})
+		batches = append(batches, batch{regionID: regionID, keys: keys})
 	}
 	return batches
 }
 
-func appendKeyBatchesByIndex(batches []batchAndIndex, regionID locate.RegionVerID, groupKeys [][]byte, indexes []*kvrpcpb.ElementIndex,limit int) []batchAndIndex {
+func appendKeyBatchesByIndex(batches []batchAndIndex, regionID locate.RegionVerID, groupKeys [][]byte, indexes []*kvrpcpb.ElementIndex, limit int) []batchAndIndex {
 	var keys [][]byte
 	var index []*kvrpcpb.ElementIndex
 	for start, count := 0, 0; start < len(groupKeys); start++ {
 		if count > limit {
-			batches = append(batches, batchAndIndex{regionID: regionID, keys: keys, indexes:index})
+			batches = append(batches, batchAndIndex{regionID: regionID, keys: keys, indexes: index})
 			keys = make([][]byte, 0, limit)
 			index = make([]*kvrpcpb.ElementIndex, 0, limit)
 			count = 0

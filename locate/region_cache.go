@@ -77,6 +77,8 @@ type RPCContext struct {
 	Region RegionVerID
 	Meta   *metapb.Region
 	Peer   *metapb.Peer
+	PeerIdx int
+	Store   *Store
 	Addr   string
 }
 
@@ -90,7 +92,7 @@ func (c *RPCContext) GetStoreID() uint64 {
 
 // GetRPCContext returns RPCContext for a region. If it returns nil, the region
 // must be out of date and already dropped from cache.
-func (c *RegionCache) GetRPCContext(bo *retry.Backoffer, id RegionVerID) (*RPCContext, error) {
+func (c *RegionCache) GetRPCContext(bo *retry.Backoffer, id RegionVerID, replicaRead bool) (*RPCContext, error) {
 	c.mu.RLock()
 	region := c.getCachedRegion(id)
 	if region == nil {
@@ -104,7 +106,13 @@ func (c *RegionCache) GetRPCContext(bo *retry.Backoffer, id RegionVerID) (*RPCCo
 	meta, peer := region.meta, region.peer
 	c.mu.RUnlock()
 
-	addr, err := c.GetStoreAddr(bo, peer.GetStoreId())
+	var addr string
+	var err error
+	if replicaRead {
+		addr, err = c.GetStoreAddr(bo, region.meta.Peers[1].Id)
+	} else {
+		addr, err = c.GetStoreAddr(bo, peer.GetStoreId())
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -120,6 +128,60 @@ func (c *RegionCache) GetRPCContext(bo *retry.Backoffer, id RegionVerID) (*RPCCo
 		Addr:   addr,
 	}, nil
 }
+
+/*
+func (c *RegionCache) GetRPCContext(bo *Backoffer, id RegionVerID, replicaRead kv.ReplicaReadType, followerStoreSeed uint32) (*RPCContext, error) {
+	ts := time.Now().Unix()
+
+	cachedRegion := c.getCachedRegionWithRLock(id)
+	if cachedRegion == nil {
+		return nil, nil
+	}
+	if !cachedRegion.checkRegionCacheTTL(ts) {
+		return nil, nil
+	}
+
+	regionStore := cachedRegion.getStore()
+	store, peer, storeIdx := cachedRegion.WorkStorePeer(regionStore)
+	var store *Store
+	var peer *metapb.Peer
+	var storeIdx int
+	switch replicaRead {
+	case kv.ReplicaReadFollower:
+		store, peer, storeIdx = cachedRegion.FollowerStorePeer(regionStore, followerStoreSeed)
+	default:
+		store, peer, storeIdx = cachedRegion.WorkStorePeer(regionStore)
+	}
+	addr, err := c.getStoreAddr(bo, cachedRegion, store, storeIdx)
+	if err != nil {
+		return nil, err
+	}
+	if store == nil || len(addr) == 0 {
+		// Store not found, region must be out of date.
+		cachedRegion.invalidate()
+		return nil, nil
+	}
+
+	storeFailEpoch := atomic.LoadUint32(&store.fail)
+	if storeFailEpoch != regionStore.storeFails[regionStore.workStoreIdx] {
+	if storeFailEpoch != regionStore.storeFails[storeIdx] {
+		cachedRegion.invalidate()
+		logutil.BgLogger().Info("invalidate current region, because others failed on same store",
+			zap.Uint64("region", id.GetID()),
+			zap.String("store", store.addr))
+		return nil, nil
+	}
+	return &RPCContext{
+		Region:  id,
+		Meta:    cachedRegion.meta,
+		Peer:    peer,
+		PeerIdx: storeIdx,
+		Store:   store,
+		Addr:    addr,
+	}, nil
+}
+ */
+
 
 // KeyLocation is the region and range that a key is located.
 type KeyLocation struct {

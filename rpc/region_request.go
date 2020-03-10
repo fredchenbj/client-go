@@ -67,29 +67,9 @@ func (s *RegionRequestSender) RPCError() error {
 
 // SendReq sends a request to tikv server.
 func (s *RegionRequestSender) SendReq(bo *retry.Backoffer, req *Request, regionID locate.RegionVerID, timeout time.Duration) (*Response, error) {
-
-	// gofail: var tikvStoreSendReqResult string
-	// switch tikvStoreSendReqResult {
-	// case "timeout":
-	// 	 return nil, errors.New("timeout")
-	// case "GCNotLeader":
-	// 	 if req.Type == CmdGC {
-	//		 return &Response{
-	//			 Type:   CmdGC,
-	//			 GC: &kvrpcpb.GCResponse{RegionError: &errorpb.Error{NotLeader: &errorpb.NotLeader{}}},
-	//		 }, nil
-	//	 }
-	// case "GCServerIsBusy":
-	//	 if req.Type == CmdGC {
-	//		 return &Response{
-	//			 Type: CmdGC,
-	//			 GC:   &kvrpcpb.GCResponse{RegionError: &errorpb.Error{ServerIsBusy: &errorpb.ServerIsBusy{}}},
-	//		 }, nil
-	//	 }
-	// }
-
+	var replicaRead = false
 	for {
-		ctx, err := s.regionCache.GetRPCContext(bo, regionID)
+		ctx, err := s.regionCache.GetRPCContext(bo, regionID, replicaRead)
 		if err != nil {
 			return nil, err
 		}
@@ -104,7 +84,14 @@ func (s *RegionRequestSender) SendReq(bo *retry.Backoffer, req *Request, regionI
 		}
 
 		s.storeAddr = ctx.Addr
-		resp, retry, err := s.sendReqToRegion(bo, ctx, req, timeout)
+		resp, retry, code, err := s.sendReqToRegion(bo, ctx, req, timeout)
+		if code == codes.Unavailable {
+			replicaRead = true
+			req.Context.ReplicaRead = replicaRead
+			resp, err := s.SendReqFollower(bo, req, replicaRead, regionID, timeout)
+			s.regionCache.DropStoreOnSendRequestFail(ctx, err)
+			return resp, err
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -129,25 +116,69 @@ func (s *RegionRequestSender) SendReq(bo *retry.Backoffer, req *Request, regionI
 	}
 }
 
-func (s *RegionRequestSender) sendReqToRegion(bo *retry.Backoffer, ctx *locate.RPCContext, req *Request, timeout time.Duration) (resp *Response, retry bool, err error) {
+// SendReq sends a request to tikv server.
+func (s *RegionRequestSender) SendReqFollower(bo *retry.Backoffer, req *Request, replicaRead bool, regionID locate.RegionVerID, timeout time.Duration) (*Response, error) {
+	for {
+		ctx, err := s.regionCache.GetRPCContext(bo, regionID, replicaRead)
+		if err != nil {
+			return nil, err
+		}
+		if ctx == nil {
+			// If the region is not found in cache, it must be out
+			// of date and already be cleaned up. We can skip the
+			// RPC by returning RegionError directly.
+
+			// TODO: Change the returned error to something like "region missing in cache",
+			// and handle this error like StaleEpoch, which means to re-split the request and retry.
+			return GenRegionErrorResp(req, &errorpb.Error{EpochNotMatch: &errorpb.EpochNotMatch{}})
+		}
+
+		s.storeAddr = ctx.Addr
+		resp, retry, _, err := s.sendReqToRegion(bo, ctx, req, timeout)
+		if err != nil {
+			return nil, err
+		}
+		if retry {
+			continue
+		}
+
+		regionErr, err := resp.GetRegionError()
+		if err != nil {
+			return nil, err
+		}
+		if regionErr != nil {
+			retry, err := s.onRegionError(bo, ctx, regionErr)
+			if err != nil {
+				return nil, err
+			}
+			if retry {
+				continue
+			}
+		}
+		return resp, nil
+	}
+}
+
+func (s *RegionRequestSender) sendReqToRegion(bo *retry.Backoffer, ctx *locate.RPCContext, req *Request, timeout time.Duration) (resp *Response, retry bool, code codes.Code, err error) {
+	code = codes.Unknown
 	if e := SetContext(req, ctx.Meta, ctx.Peer); e != nil {
-		return nil, false, err
+		return nil, false, code, err
 	}
 	resp, err = s.client.SendRequest(bo.GetContext(), ctx.Addr, req, timeout)
 	if err != nil {
 		s.rpcError = err
-		if e := s.onSendFail(bo, ctx, err); e != nil {
-			return nil, false, err
+		if code, e := s.onSendFail(bo, ctx, err); e != nil {
+			return nil, false, code, err
 		}
-		return nil, true, nil
+		return nil, true, code, nil
 	}
 	return
 }
 
-func (s *RegionRequestSender) onSendFail(bo *retry.Backoffer, ctx *locate.RPCContext, err error) error {
+func (s *RegionRequestSender) onSendFail(bo *retry.Backoffer, ctx *locate.RPCContext, err error) (codes.Code, error) {
 	// If it failed because the context is cancelled by ourself, don't retry.
 	if errors.Cause(err) == context.Canceled {
-		return err
+		return codes.Unknown, err
 	}
 	code := codes.Unknown
 	if s, ok := status.FromError(errors.Cause(err)); ok {
@@ -156,7 +187,7 @@ func (s *RegionRequestSender) onSendFail(bo *retry.Backoffer, ctx *locate.RPCCon
 	if code == codes.Canceled {
 		select {
 		case <-bo.GetContext().Done():
-			return err
+			return code, err
 		default:
 			// If we don't cancel, but the error code is Canceled, it must be from grpc remote.
 			// This may happen when tikv is killed and exiting.
@@ -164,14 +195,15 @@ func (s *RegionRequestSender) onSendFail(bo *retry.Backoffer, ctx *locate.RPCCon
 			log.Warn("receive a grpc cancel signal from remote:", err)
 		}
 	}
-
-	s.regionCache.DropStoreOnSendRequestFail(ctx, err)
+	if code != codes.Unavailable {
+		s.regionCache.DropStoreOnSendRequestFail(ctx, err)
+	}
 
 	// Retry on send request failure when it's not canceled.
 	// When a store is not available, the leader of related region should be elected quickly.
 	// TODO: the number of retry time should be limited:since region may be unavailable
 	// when some unrecoverable disaster happened.
-	return bo.Backoff(retry.BoTiKVRPC, errors.Errorf("send tikv request error: %v, ctx: %v, try next peer later", err, ctx))
+	return code, bo.Backoff(retry.BoTiKVRPC, errors.Errorf("send tikv request error: %v, ctx: %v, try next peer later", err, ctx))
 }
 
 func regionErrorToLabel(e *errorpb.Error) string {
